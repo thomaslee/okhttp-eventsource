@@ -2,7 +2,6 @@ package com.launchdarkly.eventsource;
 
 import java.net.URI;
 import java.time.Duration;
-import java.util.regex.Pattern;
 
 /**
  * Adapted from https://github.com/aslakhellesoy/eventsource-java/blob/master/src/main/java/com/github/eventsource/client/impl/EventStreamParser.java
@@ -14,15 +13,13 @@ public class EventParser {
   private static final String RETRY = "retry";
 
   private static final String DEFAULT_EVENT = "message";
-  private static final String EMPTY_STRING = "";
-  private static final Pattern DIGITS_ONLY = Pattern.compile("^[\\d]+$");
 
   private final EventHandler handler;
   private final ConnectionHandler connectionHandler;
   private final Logger logger;
   private final URI origin;
 
-  private StringBuffer data = new StringBuffer();
+  private StringBuilder data = new StringBuilder();
   private String lastEventId;
   private String eventName = DEFAULT_EVENT;
 
@@ -46,14 +43,17 @@ public class EventParser {
     } else if (line.startsWith(":")) {
       processComment(line.substring(1).trim());
     } else if ((colonIndex = line.indexOf(":")) != -1) {
-      String field = line.substring(0, colonIndex);
-      String value = line.substring(colonIndex + 1);
-      if (!value.isEmpty() && value.charAt(0) == ' ') {
-        value = value.replaceFirst(" ", EMPTY_STRING);
+      int fieldStart = 0;
+      int fieldEnd = colonIndex;
+      int valueStart = colonIndex + 1;
+      int valueEnd = line.length();
+      if (valueStart != valueEnd && line.charAt(valueStart) == ' ') {
+        valueStart++;
       }
-      processField(field, value);
+      processField(line, fieldStart, fieldEnd, valueStart, valueEnd);
     } else {
-      processField(line.trim(), EMPTY_STRING); // The spec doesn't say we need to trim the line, but I assume that's an oversight.
+      String trimmed = line.trim();
+      processField(trimmed, 0, trimmed.length(), 0, 0); // The spec doesn't say we need to trim the line, but I assume that's an oversight.
     }
   }
 
@@ -65,30 +65,60 @@ public class EventParser {
     }
   }
 
-  private void processField(String field, String value) {
-    if (DATA.equals(field)) {
-      data.append(value).append("\n");
-    } else if (ID.equals(field)) {
-      lastEventId = value;
-    } else if (EVENT.equals(field)) {
-      eventName = value;
-    } else if (RETRY.equals(field) && isNumber(value)) {
-      connectionHandler.setReconnectionTime(Duration.ofMillis(Long.parseLong(value)));
+  private void processField(String line, int fieldStart, final int fieldEnd, int valueStart, int valueEnd) {
+    if (substrEquals(DATA, 0, DATA.length(), line, fieldStart, fieldEnd)) {
+      data.append(line, valueStart, valueEnd).append("\n");
+    } else if (substrEquals(ID, 0, ID.length(), line, fieldStart, fieldEnd)) {
+      lastEventId = line.substring(valueStart, valueEnd);
+    } else if (substrEquals(EVENT, 0, EVENT.length(), line, fieldStart, fieldEnd)) {
+      eventName = line.substring(valueStart, valueEnd);
+    } else {
+      if (substrEquals(RETRY, 0, RETRY.length(), line, fieldStart, fieldEnd) && isNumber(line, valueStart, valueEnd)) {
+        connectionHandler.setReconnectionTime(Duration.ofMillis(parseLong(line, valueStart, valueEnd)));
+      }
     }
   }
 
-  private boolean isNumber(String value) {
-    return DIGITS_ONLY.matcher(value).matches();
+  private static boolean substrEquals(String a, int aStart, int aEnd, String b, int bStart, int bEnd) {
+    int aSize = aEnd - aStart;
+    int bSize = bEnd - aStart;
+    if (aSize != bSize) {
+      return false;
+    }
+    for (int i = 0; i < aSize; i++) {
+      if (a.charAt(aStart + i) != b.charAt(bStart + i)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private boolean isNumber(String value, int start, int end) {
+    for (int i = start; i < end; i++) {
+      if (!Character.isDigit(value.charAt(i))) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private long parseLong(String value, int start, int end) {
+    long total = 0;
+    for (int i = start; i < end; i++) {
+      total *= 10;
+      total += Character.digit(value.charAt(i), 10);
+    }
+    return total;
   }
 
   private void dispatchEvent() {
     if (data.length() == 0) {
       return;
     }
-    String dataString = data.toString();
-    if (dataString.endsWith("\n")) {
-      dataString = dataString.substring(0, dataString.length() - 1);
+    if (data.charAt(data.length()-1) == '\n') {
+      data.setLength(data.length()-1);
     }
+    String dataString = data.toString();
     MessageEvent message = new MessageEvent(dataString, lastEventId, origin);
     connectionHandler.setLastEventId(lastEventId);
     try {
@@ -99,7 +129,7 @@ public class EventParser {
       logger.debug("Stack trace: {}", new LazyStackTrace(e));
       handler.onError(e);
     }
-    data = new StringBuffer();
+    data = new StringBuilder();
     eventName = DEFAULT_EVENT;
   }
 }
